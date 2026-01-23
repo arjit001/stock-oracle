@@ -7,3 +7,5 @@ plotly
 scikit-learn
 requests
 fpdf
+nsepython
+pycoingecko

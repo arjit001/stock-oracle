@@ -5,3 +5,5 @@ pandas_ta
 numpy
 plotly
 scikit-learn
+requests
+fpdf

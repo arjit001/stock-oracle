@@ -33,24 +33,27 @@ st.markdown("""
 # ==========================================
 def get_stock_data(ticker):
     try:
+        # Ticker object
         stock = yf.Ticker(ticker)
         
-        # 1. Get Historical Data (1 Year for AI)
-        hist = stock.history(period="2y")
-        if hist.empty: return None, None
+        # Force a fresh download (bypassing cache)
+        hist = stock.history(period="2y", auto_adjust=True)
         
-        # 2. Get Fundamentals (Company Health)
+        if hist.empty:
+            st.error(f"⚠️ No data found for {ticker}. Try 'RELIANCE.NS' or 'BTC-USD'.")
+            return None, None
+            
         info = stock.info
         fundamentals = {
-            "pe_ratio": info.get('forwardPE', info.get('trailingPE', 0)),
+            "pe_ratio": info.get('forwardPE', 0),
             "market_cap": info.get('marketCap', 0),
             "sector": info.get('sector', 'Unknown'),
-            "beta": info.get('beta', 1), # Volatility measure
+            "beta": info.get('beta', 1),
             "name": info.get('longName', ticker)
         }
-        
         return hist, fundamentals
-    except:
+    except Exception as e:
+        st.error(f"Error: {e}")
         return None, None
 
 def run_prediction_model(df, days=30):

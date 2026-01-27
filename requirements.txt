@@ -7,5 +7,6 @@ plotly
 scikit-learn
 requests
 fpdf
-nsepython
-pycoingecko
+textblob
+streamlit-authenticator
+pyyaml

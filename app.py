@@ -4,33 +4,23 @@ import pandas_ta as ta
 import numpy as np
 import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
 from datetime import datetime, timedelta
 import yfinance as yf
-import requests
 from nsepython import equity_history
 import base64
 
 # ==========================================
-# 1. CONFIGURATION
+# 1. CONFIG & STYLES
 # ==========================================
-st.set_page_config(layout="wide", page_title="StockOracle Ultra", page_icon="🚀")
+st.set_page_config(layout="wide", page_title="StockOracle Profit", page_icon="💸")
 
-# SMART MAPPING
-STOCK_MAP = {
-    "RELIANCE": "RELIANCE.NS", "TATA MOTORS": "TATAMOTORS.NS", "SBI": "SBIN.NS",
-    "ZOMATO": "ZOMATO.NS", "PAYTM": "PAYTM.NS", "HDFC BANK": "HDFCBANK.NS",
-    "INFOSYS": "INFY.NS", "ITC": "ITC.NS", "TCS": "TCS.NS",
-    "APPLE": "AAPL", "TESLA": "TSLA", "GOOGLE": "GOOGL", "MICROSOFT": "MSFT", 
-    "BITCOIN": "BTC-USD", "ETHEREUM": "ETH-USD", "GOLD": "GC=F"
-}
+# Global Watchlist State
+if 'watchlist' not in st.session_state:
+    st.session_state.watchlist = ["RELIANCE.NS", "ZOMATO.NS", "TATAMOTORS.NS", "BTC-USD"]
 
 st.markdown("""
 <style>
-    .stApp { background-color: #0e1117; color: #ffffff; }
-    /* METRICS */
-    div[data-testid="stMetricValue"] { font-size: 22px; color: #00CC96; }
-    /* CARDS */
+    .stApp { background-color: #0e1117; color: #fff; }
     .glass-card {
         background: rgba(255, 255, 255, 0.05);
         border: 1px solid rgba(255, 255, 255, 0.1);
@@ -38,37 +28,48 @@ st.markdown("""
         padding: 20px;
         margin-bottom: 15px;
     }
-    /* PROGRESS BAR FOR WIN RATE */
-    .stProgress > div > div > div > div { background-image: linear-gradient(to right, #ff4b4b, #fafa6e, #00cc96); }
+    .buy-sig { color: #00CC96; font-weight: bold; font-size: 1.2rem; }
+    .sell-sig { color: #FF4B4B; font-weight: bold; font-size: 1.2rem; }
+    .metric-box { text-align: center; background: #1f2937; padding: 10px; border-radius: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. DATA ENGINE (HYBRID)
+# 2. ROBUST DATA ENGINE
 # ==========================================
-@st.cache_data(ttl=300)
-def get_complete_data(query):
-    symbol = STOCK_MAP.get(query.upper(), query.upper())
+def parse_symbol(query):
+    # Smart Mapping
+    MAP = {
+        "RELIANCE": "RELIANCE.NS", "TATA MOTORS": "TATAMOTORS.NS", "SBI": "SBIN.NS",
+        "ZOMATO": "ZOMATO.NS", "PAYTM": "PAYTM.NS", "HDFC BANK": "HDFCBANK.NS",
+        "INFOSYS": "INFY.NS", "ITC": "ITC.NS", "TCS": "TCS.NS",
+        "APPLE": "AAPL", "TESLA": "TSLA", "BITCOIN": "BTC-USD", "ETHEREUM": "ETH-USD"
+    }
     
-    # Suffix Logic
-    if ".US" in symbol: symbol = symbol.replace(".US", "")
-    if ".CR" in symbol: symbol = symbol.replace(".CR", "-USD")
-    if not any(x in symbol for x in [".NS", "-", "="]) and len(symbol) < 10 and symbol.isalpha():
-        symbol = f"{symbol}.NS"
+    s = query.upper().strip()
+    s = MAP.get(s, s) # Map if exists
+    
+    # Auto-Suffix logic
+    if s.endswith(".US"): return s.replace(".US", "")
+    if s.endswith(".CR"): return s.replace(".CR", "-USD")
+    # If no suffix and looks like Indian stock, add .NS
+    if not any(x in s for x in [".NS", "-", "="]) and len(s) < 9 and s.isalpha():
+        return f"{s}.NS"
+    return s
 
+@st.cache_data(ttl=300)
+def get_data(query):
+    symbol = parse_symbol(query)
     df = None
-    source = ""
-    info = {}
+    source = "Yahoo"
 
-    # FETCH 1: YAHOO
+    # 1. Try Yahoo
     try:
         ticker = yf.Ticker(symbol)
-        df = ticker.history(period="2y")
-        info = ticker.info
-        if not df.empty: source = "Yahoo Finance"
+        df = ticker.history(period="1y") # 1 Year ensures enough data for 200 EMA
     except: pass
 
-    # FETCH 2: NSE PYTHON
+    # 2. Try NSEPython (Fallback)
     if (df is None or df.empty) and ".NS" in symbol:
         try:
             clean = symbol.replace(".NS", "")
@@ -81,214 +82,184 @@ def get_complete_data(query):
                 source = "NSE Direct"
         except: pass
 
-    if df is None or df.empty: return None, None, f"Not Found: {symbol}"
+    if df is None or df.empty:
+        return None, None, f"Data not found for {symbol}"
 
-    # --- ADVANCED CALCULATIONS ---
-    # 1. Standard
-    df['RSI'] = ta.rsi(df['Close'], length=14)
-    df['EMA_50'] = ta.ema(df['Close'], length=50)
-    df['EMA_200'] = ta.ema(df['Close'], length=200)
+    # --- INTRADAY STRATEGY CALCULATIONS ---
+    # 1. Pivot Points (Classic)
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
     
-    # 2. MACD
-    macd = ta.macd(df['Close'])
-    df = pd.concat([df, macd], axis=1)
-
-    # 3. Bollinger Bands (Volatility)
-    bb = ta.bbands(df['Close'], length=20)
-    df = pd.concat([df, bb], axis=1)
-
-    # 4. Stochastic Oscillator (Overbought/Oversold)
-    stoch = ta.stoch(df['High'], df['Low'], df['Close'])
-    df = pd.concat([df, stoch], axis=1)
-
-    # 5. ATR (Average True Range for Stop Loss)
+    pivot = (prev['High'] + prev['Low'] + prev['Close']) / 3
+    r1 = (2 * pivot) - prev['Low']
+    s1 = (2 * pivot) - prev['High']
+    
+    # 2. Indicators
+    df['EMA_200'] = ta.ema(df['Close'], length=200)
+    df['RSI'] = ta.rsi(df['Close'], length=14)
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-
-    # 6. VWAP (Intraday Proxy)
+    
+    # VWAP (Approximation for daily timeframe)
     df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
 
-    # --- INTRADAY PIVOT POINTS (Classic) ---
-    last = df.iloc[-1]
-    P = (last['High'] + last['Low'] + last['Close']) / 3
-    R1 = 2*P - last['Low']
-    S1 = 2*P - last['High']
+    # 3. Intraday Signals
+    atr = df['ATR'].iloc[-1]
+    curr_price = last['Close']
+    
+    signal = "NEUTRAL"
+    action = "WAIT"
+    stop_loss = 0.0
+    target = 0.0
+    
+    # BUY Logic: Price > Pivot AND Price > VWAP
+    if curr_price > pivot and curr_price > df['VWAP'].iloc[-1]:
+        signal = "BULLISH"
+        action = "BUY / LONG"
+        stop_loss = curr_price - (1.5 * atr)
+        target = curr_price + (2 * atr)
+        
+    # SELL Logic: Price < Pivot AND Price < VWAP
+    elif curr_price < pivot and curr_price < df['VWAP'].iloc[-1]:
+        signal = "BEARISH"
+        action = "SELL / SHORT"
+        stop_loss = curr_price + (1.5 * atr)
+        target = curr_price - (2 * atr)
 
-    # --- WIN CHANCE SCORING ---
-    score = 0
-    total_checks = 6
-    
-    if last['Close'] > last['EMA_200']: score += 1
-    if last['MACD_12_26_9'] > last['MACDs_12_26_9']: score += 1
-    if last['RSI'] < 70 and last['RSI'] > 30: score += 1 # Healthy range
-    if last['Close'] > last['VWAP']: score += 1
-    if last['STOCHk_14_3_3'] > last['STOCHd_14_3_3']: score += 1 # Stoch Cross
-    if last['Close'] > last['BBU_20_2.0']: score -= 1 # Hit upper band (reversal risk)
-    
-    win_prob = min(max((score / total_checks) * 100, 10), 99)
-    
-    # Verdict
-    if win_prob > 75: verdict = "STRONG BUY 🚀"
-    elif win_prob > 55: verdict = "BUY 📈"
-    elif win_prob < 30: verdict = "STRONG SELL 📉"
-    elif win_prob < 45: verdict = "SELL 🔻"
-    else: verdict = "HOLD ✋"
+    # 4. ML Prediction (Simple Random Forest)
+    try:
+        df_ml = df.copy().dropna()
+        X = df_ml[['Open', 'High', 'Low', 'Volume']]
+        y = df_ml['Close']
+        model = RandomForestRegressor(n_estimators=50).fit(X, y)
+        pred_price = model.predict([last[['Open', 'High', 'Low', 'Volume']].values])[0]
+    except:
+        pred_price = curr_price # Fallback
 
-    data_pack = {
+    data = {
         "symbol": symbol,
-        "price": last['Close'],
+        "price": curr_price,
+        "prev_close": prev['Close'],
         "currency": "₹" if ".NS" in symbol else "$",
-        "change": (last['Close'] - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100,
-        "volatility": df['ATR'].iloc[-1],
-        "verdict": verdict,
-        "win_prob": win_prob,
-        "pivot": {"P": P, "R1": R1, "S1": S1},
-        "signals": {
-            "RSI": last['RSI'],
-            "MACD": "Bullish" if last['MACD_12_26_9'] > last['MACDs_12_26_9'] else "Bearish",
-            "Trend": "Up" if last['Close'] > last['EMA_200'] else "Down",
-            "Bollinger": "Overbought" if last['Close'] > last['BBU_20_2.0'] else "Oversold" if last['Close'] < last['BBL_20_2.0'] else "Neutral"
-        },
-        "info": info,
+        "change": ((curr_price - prev['Close'])/prev['Close']) * 100,
+        "pivot": pivot,
+        "r1": r1, "s1": s1,
+        "signal": signal,
+        "action": action,
+        "stop_loss": stop_loss,
+        "target": target,
+        "pred_price": pred_price,
         "source": source
     }
     
-    return df, data_pack, None
+    return df, data, None
 
 # ==========================================
-# 3. MACHINE LEARNING ENGINE
-# ==========================================
-def predict_ml(df):
-    # Prepare Data for ML
-    df = df.copy().dropna()
-    df['Target'] = df['Close'].shift(-1) # Predict next day's close
-    df = df.dropna()
-    
-    features = ['Close', 'Open', 'High', 'Low', 'Volume', 'RSI', 'EMA_50', 'EMA_200']
-    X = df[features]
-    y = df['Target']
-    
-    # Train Random Forest
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X, y)
-    
-    # Predict Next 7 Days (Auto-Regressive)
-    future_prices = []
-    last_row = X.iloc[[-1]].copy()
-    
-    for _ in range(7):
-        pred = model.predict(last_row)[0]
-        future_prices.append(pred)
-        # Update last_row for next step (Simulated)
-        last_row['Close'] = pred
-        # Note: In real production, we'd need to re-calc indicators. This is a fast approximation.
-    
-    return future_prices
-
-# ==========================================
-# 4. REPORT ENGINE
-# ==========================================
-def create_report(fund, df, ml_preds):
-    html = f"""
-    <html><body style="font-family:sans-serif; padding:30px; color:#333;">
-        <h1 style="border-bottom:2px solid #333;">{fund['symbol']} Institutional Report</h1>
-        <div style="background:{'#d4edda' if 'BUY' in fund['verdict'] else '#f8d7da'}; padding:15px; border-radius:5px; margin:20px 0;">
-            <h2>AI VERDICT: {fund['verdict']} ({fund['win_prob']:.0f}% Probability)</h2>
-        </div>
-        
-        <h3>📊 Intraday Levels (Day Trading)</h3>
-        <table style="width:100%; text-align:left; border-collapse:collapse;">
-            <tr style="background:#eee;"><th>Level</th><th>Price</th><th>Action</th></tr>
-            <tr><td>Resistance (R1)</td><td>{fund['pivot']['R1']:.2f}</td><td>Sell Zone (Short)</td></tr>
-            <tr><td>Pivot Point</td><td>{fund['pivot']['P']:.2f}</td><td>Neutral</td></tr>
-            <tr><td>Support (S1)</td><td>{fund['pivot']['S1']:.2f}</td><td>Buy Zone (Long)</td></tr>
-        </table>
-        
-        <h3>🤖 ML Forecast (Next 7 Days)</h3>
-        <p>The AI Model (Random Forest) predicts a move to: <b>{fund['currency']} {ml_preds[-1]:.2f}</b></p>
-        
-        <h3>📉 Short Selling Opportunity?</h3>
-        <p>{'YES. Asset is Overbought + Bearish Trend.' if fund['signals']['Trend'] == 'Down' and fund['signals']['Bollinger'] == 'Overbought' else 'NO. Trend is currently strong.'}</p>
-        
-        <p style="margin-top:50px; color:#888; font-size:12px;">Generated by StockOracle Ultra.</p>
-    </body></html>
-    """
-    return html
-
-# ==========================================
-# 5. UI DASHBOARD
+# 3. UI LAYOUT
 # ==========================================
 with st.sidebar:
-    st.title("🎛 Control Room")
-    q_sel = st.selectbox("Quick Load:", ["Select...", "RELIANCE", "TATA MOTORS", "ZOMATO", "APPLE", "BITCOIN"])
-    if q_sel != "Select...": st.session_state.sel = q_sel
+    st.title("🎛 Control Panel")
+    st.info("Mode: **Intraday Profit**")
 
-st.title("🚀 StockOracle: Ultra Edition")
-st.caption("Machine Learning • Intraday Signals • Short Selling Analysis")
+st.title("💸 StockOracle: Profit Edition")
+st.caption("Intraday Signals • Pivot Points • VWAP Strategy")
 
-query = st.text_input("Search Asset:", value=st.session_state.get('sel', 'RELIANCE'))
+tab1, tab2 = st.tabs(["🚀 Intraday Analysis", "📊 Comparison Table"])
 
-if st.button("🚀 Run AI Analysis", type="primary"):
-    with st.spinner("Training AI Models & Calculating Pivot Points..."):
-        df, data, err = get_complete_data(query)
+# --- TAB 1: SINGLE STOCK ---
+with tab1:
+    col_input, col_btn = st.columns([3, 1])
+    with col_input:
+        query = st.text_input("Enter Asset:", "ZOMATO")
+    with col_btn:
+        run = st.button("Analyze Now", type="primary")
+
+    if run:
+        with st.spinner("Calculating Intraday Levels..."):
+            df, data, err = get_data(query)
+            if err:
+                st.error(err)
+            else:
+                # HEADER
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Current Price", f"{data['currency']} {data['price']:.2f}", f"{data['change']:.2f}%")
+                m2.metric("Signal", data['signal'], delta=data['action'])
+                m3.metric("Stop Loss", f"{data['stop_loss']:.2f}")
+                m4.metric("Target", f"{data['target']:.2f}")
+
+                # ACTION CARD
+                st.markdown("---")
+                c_act, c_lvl = st.columns([1, 1])
+                
+                with c_act:
+                    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                    st.subheader("⚡ Recommended Action")
+                    if "BUY" in data['action']:
+                        st.markdown(f"<div class='buy-sig'>🚀 {data['action']}</div>", unsafe_allow_html=True)
+                        st.write("Reason: Price is above Daily Pivot & VWAP.")
+                    elif "SELL" in data['action']:
+                        st.markdown(f"<div class='sell-sig'>🔻 {data['action']}</div>", unsafe_allow_html=True)
+                        st.write("Reason: Price is below Daily Pivot & VWAP.")
+                    else:
+                        st.write("✋ WAIT. Market is chopping around Pivot.")
+                    
+                    st.write(f"**AI Predicted Close:** {data['pred_price']:.2f}")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                
+                with c_lvl:
+                    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                    st.subheader("🎯 Key Levels (Today)")
+                    st.write(f"Resistance (R1): **{data['r1']:.2f}**")
+                    st.write(f"Pivot Point: **{data['pivot']:.2f}**")
+                    st.write(f"Support (S1): **{data['s1']:.2f}**")
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+                # CHART
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
+                # Add Pivot Line
+                fig.add_hline(y=data['pivot'], line_dash="dash", line_color="yellow", annotation_text="Pivot")
+                fig.update_layout(height=500, template="plotly_dark", title=f"{data['symbol']} Intraday Chart")
+                st.plotly_chart(fig, use_container_width=True)
+
+# --- TAB 2: COMPARISON TABLE (FIXED) ---
+with tab2:
+    st.subheader("📈 Live Market Watch")
+    
+    # Input for adding
+    new_s = st.text_input("Add Stock to Watchlist:", placeholder="e.g. TATAMOTORS")
+    if st.button("Add"):
+        if new_s:
+            clean = parse_symbol(new_s)
+            if clean not in st.session_state.watchlist:
+                st.session_state.watchlist.append(clean)
+    
+    # Remove tags
+    st.write("Watchlist:")
+    cols = st.columns(6)
+    for i, s in enumerate(st.session_state.watchlist):
+        if cols[i % 6].button(f"❌ {s}"):
+            st.session_state.watchlist.remove(s)
+            st.rerun()
+
+    if st.button("🔄 Refresh Table"):
+        rows = []
+        progress = st.progress(0)
+        for i, s in enumerate(st.session_state.watchlist):
+            _, d, e = get_data(s)
+            if d:
+                rows.append({
+                    "Symbol": s,
+                    "Price": f"{d['currency']} {d['price']:.2f}",
+                    "Action": d['action'],
+                    "Pivot": f"{d['pivot']:.2f}",
+                    "Target": f"{d['target']:.2f}",
+                    "AI Pred": f"{d['pred_price']:.2f}"
+                })
+            progress.progress((i+1)/len(st.session_state.watchlist))
         
-        if err: st.error(err)
-        else:
-            # --- HEADER ---
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Price", f"{data['currency']} {data['price']:.2f}", f"{data['change']:.2f}%")
-            c2.metric("Win Probability", f"{data['win_prob']:.0f}%", delta="High Confidence" if data['win_prob']>70 else "Low Confidence")
-            c3.metric("ATR (Volatility)", f"{data['volatility']:.2f}")
-            c4.metric("Recommendation", data['verdict'])
-            
-            st.progress(int(data['win_prob']))
-
-            # --- INTRADAY PANEL (New Feature) ---
-            st.markdown("### ⚡ Intraday & Short Selling")
-            i1, i2, i3 = st.columns(3)
-            
-            with i1:
-                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                st.write("**📌 Pivot Points (Today)**")
-                st.write(f"Resist (Sell): **{data['pivot']['R1']:.2f}**")
-                st.write(f"Support (Buy): **{data['pivot']['S1']:.2f}**")
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            with i2:
-                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                st.write("**📉 Short Sell Signal?**")
-                if data['signals']['Trend'] == 'Down' and data['price'] < data['pivot']['P']:
-                    st.error("YES. Price below Pivot & Trend Down.")
-                else:
-                    st.success("NO. Buying pressure is present.")
-                st.write(f"VWAP: **{df['VWAP'].iloc[-1]:.2f}**")
-                st.markdown('</div>', unsafe_allow_html=True)
-
-            with i3:
-                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                st.write("**🤖 ML Prediction (7 Days)**")
-                preds = predict_ml(df)
-                gain = ((preds[-1] - data['price']) / data['price']) * 100
-                color = "green" if gain > 0 else "red"
-                st.markdown(f"Target: **{preds[-1]:.2f}**")
-                st.markdown(f"Potential: :{color}[{gain:.2f}%]")
-                st.markdown('</div>', unsafe_allow_html=True)
-
-            # --- ADVANCED CHART ---
-            fig = go.Figure()
-            # Candlestick
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
-            # Bollinger Bands
-            fig.add_trace(go.Scatter(x=df.index, y=df['BBU_20_2.0'], line=dict(color='gray', width=1, dash='dot'), name='Upper Band'))
-            fig.add_trace(go.Scatter(x=df.index, y=df['BBL_20_2.0'], line=dict(color='gray', width=1, dash='dot'), name='Lower Band', fill='tonexty'))
-            # ML Forecast
-            dates = [df.index[-1] + timedelta(days=i) for i in range(1, 8)]
-            fig.add_trace(go.Scatter(x=dates, y=preds, line=dict(color='#ff00ff', width=3), name='AI Forecast'))
-            
-            fig.update_layout(height=600, template="plotly_dark", title=f"AI Analysis: {data['symbol']}")
-            st.plotly_chart(fig, use_container_width=True)
-
-            # --- REPORT DOWNLOAD ---
-            html = create_report(data, df, preds)
-            b64 = base64.b64encode(html.encode()).decode()
-            href = f'<a href="data:text/html;base64,{b64}" download="{data["symbol"]}_Ultra_Report.html" style="text-decoration:none; color:black; background:#00CC96; padding:15px 30px; border-radius:8px; font-weight:bold; display:block; text-align:center;">📥 Download Hedge Fund Report</a>'
-            st.markdown(href, unsafe_allow_html=True)
+        if rows:
+            df_res = pd.DataFrame(rows)
+            def color_action(val):
+                color = '#00CC96' if 'BUY' in val else '#FF4B4B' if 'SELL' in val else 'white'
+                return f'color: {color}; font-weight: bold'
+            st.dataframe(df_res.style.map(color_action, subset=['Action']), use_container_width=True)

@@ -18,7 +18,7 @@ import tempfile
 st.set_page_config(layout="wide", page_title="StockOracle Ultimate", page_icon="📈")
 
 # 🔑 API KEY (Twelve Data) - Get free at twelvedata.com
-API_KEY = "YOUR_API_KEY_HERE"
+API_KEY = "1e345639f9b44da9bd71ffc51b63c9ee"
 
 # MODERN CSS
 st.markdown("""

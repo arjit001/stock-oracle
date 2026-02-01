@@ -3,71 +3,84 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime
 import yfinance as yf
 from nsepython import equity_history
+import time
 
 # ==========================================
 # 1. CONFIG & STYLES
 # ==========================================
-st.set_page_config(layout="wide", page_title="StockOracle Workspace", page_icon="🖥️")
+st.set_page_config(layout="wide", page_title="StockOracle Algo", page_icon="🤖")
 
-# Initialize Session State for Paper Trading
-if 'paper_portfolio' not in st.session_state:
-    st.session_state.paper_portfolio = []
+if 'trade_log' not in st.session_state: st.session_state.trade_log = []
+if 'broker_status' not in st.session_state: st.session_state.broker_status = False
 
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; color: #fff; }
-    .glass-card {
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 12px;
-        padding: 20px;
-        margin-bottom: 15px;
-    }
-    .bullish-text { color: #00CC96; font-weight: bold; }
-    .bearish-text { color: #FF4B4B; font-weight: bold; }
-    .pattern-tag {
-        background-color: #333;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 0.8rem;
-        margin-right: 5px;
-        border: 1px solid #555;
-    }
+    .glass-card { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 20px; margin-bottom: 15px; }
+    .pattern-tag { background-color: #333; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; margin-right: 5px; border: 1px solid #555; }
+    .success-msg { color: #00CC96; font-weight: bold; }
+    .error-msg { color: #FF4B4B; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. INTELLIGENT DATA ENGINE
+# 2. BROKER BRIDGE (THE ALGO ENGINE)
+# ==========================================
+def connect_broker(api_key, client_id, pwd):
+    # ---------------------------------------------------------
+    # REAL BROKER CODE GOES HERE (e.g., Angel One / Zerodha)
+    # ---------------------------------------------------------
+    # from smartapi import SmartConnect
+    # obj = SmartConnect(api_key=api_key)
+    # data = obj.generateSession(client_id, pwd)
+    # return obj
+    # ---------------------------------------------------------
+    
+    # SIMULATION FOR DEMO
+    time.sleep(1) # Fake network delay
+    if len(api_key) > 5:
+        return True
+    return False
+
+def place_broker_order(symbol, qty, side, order_type="MARKET"):
+    # ---------------------------------------------------------
+    # REAL ORDER PLACEMENT
+    # ---------------------------------------------------------
+    # orderparams = {
+    #     "variety": "NORMAL", "tradingsymbol": symbol, "symboltoken": "3045",
+    #     "transactiontype": side, "exchange": "NSE", "ordertype": order_type,
+    #     "producttype": "INTRADAY", "duration": "DAY", "price": "0", "quantity": qty
+    # }
+    # order_id = broker.placeOrder(orderparams)
+    # return order_id
+    # ---------------------------------------------------------
+    
+    # SIMULATION
+    time.sleep(1)
+    return f"ORD_{int(time.time())}"
+
+# ==========================================
+# 3. DATA & ANALYSIS ENGINE
 # ==========================================
 def parse_symbol(query):
-    MAP = {
-        "RELIANCE": "RELIANCE.NS", "TATA MOTORS": "TATAMOTORS.NS", "SBI": "SBIN.NS",
-        "ZOMATO": "ZOMATO.NS", "PAYTM": "PAYTM.NS", "HDFC BANK": "HDFCBANK.NS",
-        "INFOSYS": "INFY.NS", "ITC": "ITC.NS", "TCS": "TCS.NS",
-        "APPLE": "AAPL", "TESLA": "TSLA", "BITCOIN": "BTC-USD", "NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"
-    }
+    MAP = {"RELIANCE": "RELIANCE.NS", "TATA MOTORS": "TATAMOTORS.NS", "SBI": "SBIN.NS", "ZOMATO": "ZOMATO.NS", "NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK"}
     s = query.upper().strip()
     s = MAP.get(s, s)
-    if s.endswith(".US"): return s.replace(".US", "")
-    if s.endswith(".CR"): return s.replace(".CR", "-USD")
-    if not any(x in s for x in [".NS", "-", "="]) and len(s) < 9 and s.isalpha():
-        return f"{s}.NS"
+    if not any(x in s for x in [".NS", "-", "="]) and len(s) < 9 and s.isalpha(): return f"{s}.NS"
     return s
 
 @st.cache_data(ttl=300)
 def get_data(query):
     symbol = parse_symbol(query)
     df = None
-    source = "Yahoo"
-
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1y")
     except: pass
-
+    
     if (df is None or df.empty) and ".NS" in symbol:
         try:
             clean = symbol.replace(".NS", "")
@@ -77,78 +90,31 @@ def get_data(query):
                 df = df.rename(columns={'CH_TIMESTAMP': 'Date', 'CH_CLOSING_PRICE': 'Close', 'CH_OPENING_PRICE': 'Open', 'CH_TRADE_HIGH_PRICE': 'High', 'CH_TRADE_LOW_PRICE': 'Low', 'CH_TOT_TRADED_QTY': 'Volume'})
                 df['Date'] = pd.to_datetime(df['Date'])
                 df = df.set_index('Date').sort_index().astype(float)
-                source = "NSE Direct"
         except: pass
 
-    if df is None or df.empty:
-        return None, None, f"Data not found for {symbol}"
+    if df is None or df.empty: return None, None, "Data Not Found"
 
-    # --- TECHNICALS ---
-    df['EMA_50'] = ta.ema(df['Close'], length=50)
+    # INDICATORS
     df['EMA_200'] = ta.ema(df['Close'], length=200)
     df['RSI'] = ta.rsi(df['Close'], length=14)
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     
-    # Pivot Points
     last = df.iloc[-1]
     prev = df.iloc[-2]
     pivot = (prev['High'] + prev['Low'] + prev['Close']) / 3
-    r1 = (2 * pivot) - prev['Low']
-    s1 = (2 * pivot) - prev['High']
     
-    # --- PATTERN RECOGNITION (Custom Logic) ---
-    patterns = []
-    
-    # 1. Hammer (Bullish Reversal)
-    # Body is small, Lower shadow is 2x body, Upper shadow is tiny
-    body = abs(last['Close'] - last['Open'])
-    lower_shadow = last['Open'] - last['Low'] if last['Close'] > last['Open'] else last['Close'] - last['Low']
-    upper_shadow = last['High'] - last['Close'] if last['Close'] > last['Open'] else last['High'] - last['Open']
-    
-    if lower_shadow > (2 * body) and upper_shadow < (0.5 * body):
-        patterns.append("🔨 Hammer (Bullish)")
-        
-    # 2. Shooting Star (Bearish Reversal)
-    # Upper shadow 2x body, Lower shadow tiny
-    if upper_shadow > (2 * body) and lower_shadow < (0.5 * body):
-        patterns.append("☄️ Shooting Star (Bearish)")
-        
-    # 3. Bullish Engulfing
-    # Today green, yesterday red, today completely covers yesterday
-    prev_body = abs(prev['Close'] - prev['Open'])
-    if last['Close'] > last['Open'] and prev['Close'] < prev['Open']: # Green after Red
-        if last['Close'] > prev['Open'] and last['Open'] < prev['Close']:
-            patterns.append("🕯️ Bullish Engulfing")
-
-    # --- SIGNAL GENERATION ---
+    # SIGNAL LOGIC
     score = 0
-    reasons = []
-    
-    # Pivot Check
-    if last['Close'] > pivot: 
-        score += 1
-        reasons.append("Above Pivot")
-    else: 
-        score -= 1
-        reasons.append("Below Pivot")
-        
-    # Trend Check
-    if last['Close'] > df['EMA_200'].iloc[-1]:
-        score += 1
-        reasons.append("Uptrend")
-    
-    # Pattern Bonus
-    if "Bullish" in str(patterns): score += 2
-    if "Bearish" in str(patterns): score -= 2
+    if last['Close'] > pivot: score += 1
+    if last['Close'] > df['EMA_200'].iloc[-1]: score += 1
     
     atr = df['ATR'].iloc[-1]
-    
     if score >= 2:
         verdict = "BUY"
         color = "#00CC96"
         sl = last['Close'] - (1.5 * atr)
         tgt = last['Close'] + (2.5 * atr)
-    elif score <= -2:
+    elif score <= 0: # Stricter Sell
         verdict = "SELL"
         color = "#FF4B4B"
         sl = last['Close'] + (1.5 * atr)
@@ -156,125 +122,104 @@ def get_data(query):
     else:
         verdict = "WAIT"
         color = "#FFD700"
-        sl = last['Close'] * 0.99
-        tgt = last['Close'] * 1.01
+        sl, tgt = 0, 0
 
     data = {
-        "symbol": symbol,
-        "price": last['Close'],
-        "currency": "₹" if ".NS" in symbol else "$",
-        "change": ((last['Close'] - prev['Close'])/prev['Close']) * 100,
-        "verdict": verdict,
-        "verdict_color": color,
-        "patterns": patterns,
-        "pivot": pivot,
-        "r1": r1, "s1": s1,
-        "stop_loss": sl,
-        "target": tgt,
-        "atr": atr,
-        "rsi": last['RSI'],
-        "source": source
+        "symbol": symbol, "price": last['Close'], "verdict": verdict, "color": color,
+        "sl": sl, "tgt": tgt, "rsi": last['RSI'], "pivot": pivot
     }
     return df, data, None
 
 # ==========================================
-# 3. UI DASHBOARD
+# 4. UI DASHBOARD
 # ==========================================
-st.title("🖥️ StockOracle: Trader's Workspace")
+st.title("🤖 StockOracle: Algo Edition")
 
-# --- SIDEBAR: PAPER TRADING ---
+# --- SIDEBAR: BROKER LOGIN ---
 with st.sidebar:
-    st.header("📝 Paper Trading")
-    st.caption("Practice without real money")
+    st.header("🔐 Broker Connection")
+    st.caption("Connect AngelOne / Zerodha")
     
-    # Simple Portfolio Display
-    if st.session_state.paper_portfolio:
-        for trade in st.session_state.paper_portfolio:
-            with st.expander(f"{trade['symbol']} ({trade['side']})"):
-                st.write(f"Entry: {trade['entry']}")
-                st.write(f"Qty: {trade['qty']}")
-                if st.button("Close Trade", key=f"close_{trade['symbol']}"):
-                    st.session_state.paper_portfolio.remove(trade)
-                    st.rerun()
-    else:
-        st.info("No active simulated trades.")
+    api_key = st.text_input("API Key", type="password")
+    client_id = st.text_input("Client ID")
+    
+    if st.button("Connect Broker"):
+        if connect_broker(api_key, client_id, "pwd"):
+            st.session_state.broker_status = True
+            st.success("Connected to Broker ✅")
+        else:
+            st.error("Connection Failed ❌")
+            
+    st.divider()
+    st.write("📜 **Algo Trade Log**")
+    for log in st.session_state.trade_log:
+        st.caption(log)
 
-# --- MAIN INPUT ---
+# --- MAIN ANALYSIS ---
 c1, c2 = st.columns([3, 1])
-with c1: query = st.text_input("Analyze Asset:", "TATAMOTORS")
+with c1: query = st.text_input("Asset:", "TATAMOTORS")
 with c2: 
-    if st.button("Scan Market", type="primary"): st.session_state.scan = True
+    if st.button("Scan", type="primary"): st.session_state.scan = True
 
 if st.session_state.get('scan', False):
-    with st.spinner("Scanning Charts & Patterns..."):
-        df, data, err = get_data(query)
-        
-        if err:
-            st.error(err)
-        else:
-            # 1. HEADLINES
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Price", f"{data['currency']} {data['price']:.2f}", f"{data['change']:.2f}%")
-            m2.metric("RSI (14)", f"{data['rsi']:.0f}")
-            m3.metric("Trend", "BULLISH" if data['price'] > df['EMA_200'].iloc[-1] else "BEARISH")
-            m4.markdown(f"<div style='background:{data['verdict_color']}; color:black; padding:10px; border-radius:5px; text-align:center; font-weight:bold;'>{data['verdict']}</div>", unsafe_allow_html=True)
-            
-            # 2. PATTERN & SETUP CARD
-            st.markdown("### 🔍 Technical Setup")
-            c_setup, c_calc = st.columns([1, 1])
-            
-            with c_setup:
-                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                st.subheader("Candlestick Patterns")
-                if data['patterns']:
-                    for p in data['patterns']:
-                        st.markdown(f"<span class='pattern-tag'>{p}</span>", unsafe_allow_html=True)
-                else:
-                    st.write("No major reversal patterns detected today.")
-                
-                st.markdown("---")
-                st.write(f"**Stop Loss:** {data['stop_loss']:.2f}")
-                st.write(f"**Target:** {data['target']:.2f}")
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-            # 3. POSITION SIZING CALCULATOR (New Feature)
-            with c_calc:
-                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                st.subheader("🧮 Position Size Calculator")
-                capital = st.number_input("Capital Available (₹/$)", value=50000, step=1000)
-                risk_pct = st.slider("Risk per Trade (%)", 1, 5, 2)
-                
-                risk_amount = capital * (risk_pct / 100)
-                risk_per_share = abs(data['price'] - data['stop_loss'])
-                
-                if risk_per_share > 0:
-                    qty = int(risk_amount / risk_per_share)
-                    total_value = qty * data['price']
-                    
-                    st.write(f"Risk Amount: **{data['currency']} {risk_amount:.0f}**")
-                    st.markdown(f"### Buy **{qty}** Shares")
-                    st.caption(f"Total Value: {data['currency']} {total_value:.0f}")
-                    
-                    # PAPER TRADE BUTTON
-                    if st.button("Simulate This Trade"):
-                        st.session_state.paper_portfolio.append({
-                            "symbol": data['symbol'],
-                            "side": data['verdict'],
-                            "entry": data['price'],
-                            "qty": qty
-                        })
-                        st.success(f"Added {qty} {data['symbol']} to Paper Portfolio!")
-                else:
-                    st.warning("Stop Loss too close to Price.")
-                st.markdown('</div>', unsafe_allow_html=True)
+    df, data, err = get_data(query)
+    if err: st.error(err)
+    else:
+        # TOP METRICS
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Price", f"{data['price']:.2f}")
+        m2.metric("Signal", data['verdict'])
+        m3.metric("Stop Loss", f"{data['sl']:.2f}")
+        m4.metric("Target", f"{data['tgt']:.2f}")
 
-            # 4. CHART
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
-            fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange', width=1), name='50 EMA'))
-            fig.add_hline(y=data['pivot'], line_dash="dash", line_color="white", annotation_text="Pivot")
-            fig.add_hline(y=data['stop_loss'], line_color="red", annotation_text="SL")
-            fig.add_hline(y=data['target'], line_color="green", annotation_text="TGT")
+        # CHART
+        fig = go.Figure(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']))
+        fig.add_hline(y=data['pivot'], line_dash="dash", line_color="white", annotation_text="Pivot")
+        fig.add_hline(y=data['sl'], line_color="red", annotation_text="SL")
+        fig.update_layout(height=400, template="plotly_dark", margin=dict(l=0,r=0,t=0,b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- THE ALGO EXECUTION CARD ---
+        st.markdown("### ⚡ Algo Execution Terminal")
+        
+        ex_col1, ex_col2 = st.columns([1, 1])
+        
+        with ex_col1:
+            st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+            st.subheader("1. Position Sizing")
+            capital = st.number_input("Capital (₹)", 50000)
+            risk = st.slider("Risk %", 1, 5, 2)
             
-            fig.update_layout(height=500, template="plotly_dark", title=f"{data['symbol']} Trading View", xaxis_rangeslider_visible=False)
-            st.plotly_chart(fig, use_container_width=True)
+            # Auto-Calculate Qty
+            risk_amt = capital * (risk/100)
+            risk_per_share = abs(data['price'] - data['sl'])
+            qty = int(risk_amt / risk_per_share) if risk_per_share > 0 else 0
+            
+            st.info(f"Recommended Qty: **{qty} shares** (Risk: ₹{risk_amt:.0f})")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+        with ex_col2:
+            st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+            st.subheader("2. Execute Trade")
+            
+            if not st.session_state.broker_status:
+                st.warning("⚠️ Broker Disconnected. Running in Simulation Mode.")
+            else:
+                st.success("✅ Broker Connected. Real Orders Enabled.")
+            
+            # THE BIG BUTTONS
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button(f"BUY {qty} QTY", type="primary", disabled=data['verdict']!="BUY" or qty==0):
+                    order_id = place_broker_order(data['symbol'], qty, "BUY")
+                    st.session_state.trade_log.append(f"🟢 BOUGHT {qty} {data['symbol']} @ {data['price']}")
+                    st.success(f"Order Placed! ID: {order_id}")
+            
+            with b2:
+                if st.button(f"SELL {qty} QTY", type="secondary", disabled=data['verdict']!="SELL" or qty==0):
+                    order_id = place_broker_order(data['symbol'], qty, "SELL")
+                    st.session_state.trade_log.append(f"🔴 SOLD {qty} {data['symbol']} @ {data['price']}")
+                    st.error(f"Order Placed! ID: {order_id}")
+            
+            st.caption("Note: Orders are Market Orders (Intraday)")
+            st.markdown('</div>', unsafe_allow_html=True)

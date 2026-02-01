@@ -1,8 +1,9 @@
 streamlit
-yfinance>=0.2.40
+yfinance>=0.2.50
 pandas
 pandas_ta
 numpy
 plotly
 scikit-learn
 textblob
+nsepython

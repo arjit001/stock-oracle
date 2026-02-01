@@ -7,212 +7,238 @@ from fpdf import FPDF
 from textblob import TextBlob
 import time
 import plotly.graph_objects as go
+from sklearn.linear_model import LinearRegression
+from datetime import datetime, timedelta
+import io
+import tempfile
 
 # ==========================================
-# 1. CONFIG & API SETUP
+# 1. APP CONFIG & "GLASS" UI
 # ==========================================
-st.set_page_config(layout="wide", page_title="StockOracle SaaS", page_icon="📈")
+st.set_page_config(layout="wide", page_title="StockOracle Ultimate", page_icon="📈")
 
-# 🔑 PASTE YOUR TWELVE DATA API KEY HERE
-# Get it for free at: https://twelvedata.com/
-API_KEY = "1e345639f9b44da9bd71ffc51b63c9ee" 
+# 🔑 API KEY (Twelve Data) - Get free at twelvedata.com
+API_KEY = "YOUR_API_KEY_HERE"
 
+# MODERN CSS
 st.markdown("""
 <style>
-    .stApp { background-color: #0e1117; }
-    .ad-banner { background-color: #262730; border: 2px dashed #FFD700; padding: 15px; text-align: center; border-radius: 10px; margin-bottom: 20px; transition: transform 0.2s; }
-    .ad-banner:hover { transform: scale(1.01); background-color: #333; }
-    .lock-box { border: 1px solid #444; background: rgba(255, 255, 255, 0.05); padding: 40px; text-align: center; border-radius: 10px; }
+    .stApp { background-color: #000000; color: #FFFFFF; }
+    .glass-card {
+        background: rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 20px;
+    }
+    div[data-testid="stMetricValue"] { font-size: 28px; color: #00CC96; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. LOGIN SYSTEM
+# 2. SESSION STATE
 # ==========================================
 if 'logged_in' not in st.session_state: st.session_state.logged_in = False
-if 'user_tier' not in st.session_state: st.session_state.user_tier = 'Free'
-if 'username' not in st.session_state: st.session_state.username = ''
-
-def login_screen():
-    st.title("🔐 Login to StockOracle")
-    c1, c2, c3 = st.columns([1,2,1])
-    with c2:
-        with st.form("login"):
-            u = st.text_input("Username")
-            p = st.text_input("Password", type="password")
-            if st.form_submit_button("Log In"):
-                if u.lower() == "admin" and p == "123":
-                    st.session_state.logged_in = True
-                    st.session_state.user_tier = "Pro"
-                    st.session_state.username = "Admin"
-                    st.rerun()
-                elif u.lower() == "user" and p == "123":
-                    st.session_state.logged_in = True
-                    st.session_state.user_tier = "Free"
-                    st.session_state.username = "User"
-                    st.rerun()
-                else: st.error("Try: user/123 or admin/123")
-    st.info("💡 **Demo Logins:** `user` / `123` (Free) | `admin` / `123` (Pro)")
-
-def logout():
-    st.session_state.logged_in = False
-    st.session_state.user_tier = 'Free'
-    st.rerun()
+if 'user_tier' not in st.session_state: st.session_state.user_tier = 'Guest'
 
 # ==========================================
-# 3. PROFESSIONAL DATA ENGINE (Twelve Data)
+# 3. PROFESSIONAL PDF ENGINE (THE UPGRADE)
+# ==========================================
+class ProPDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 10)
+        self.set_text_color(150, 150, 150)
+        self.cell(0, 10, 'StockOracle AI | Institutional Research', 0, 1, 'R')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.set_text_color(150, 150, 150)
+        self.cell(0, 10, f'Page {self.page_no()} | Generated on {datetime.now().strftime("%Y-%m-%d")} | NOT FINANCIAL ADVICE', 0, 0, 'C')
+
+def create_pro_report(ticker, fund, df, fig):
+    pdf = ProPDF()
+    pdf.add_page()
+    
+    # 1. TITLE HEADER
+    pdf.set_font("Arial", "B", 24)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 15, f"{fund['name']} ({ticker})", 0, 1)
+    
+    pdf.set_font("Arial", "", 12)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 8, f"Sector Report | Date: {datetime.now().strftime('%d %b %Y')}", 0, 1)
+    pdf.line(10, 35, 200, 35)
+    pdf.ln(10)
+    
+    # 2. EXECUTIVE SUMMARY TABLE
+    pdf.set_font("Arial", "B", 14)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 10, "Executive Summary", 0, 1)
+    
+    # Verdict Color Logic
+    verdict_color = (0, 150, 0) if "BUY" in fund['verdict'] else (200, 0, 0)
+    
+    pdf.set_font("Arial", "B", 16)
+    pdf.set_text_color(*verdict_color)
+    pdf.cell(0, 10, f"AI VERDICT: {fund['verdict']}", 0, 1)
+    pdf.set_text_color(0, 0, 0) # Reset
+    
+    # Metrics Grid
+    pdf.set_font("Arial", "", 11)
+    pdf.set_fill_color(240, 240, 240)
+    
+    metrics = [
+        ["Current Price", f"INR {fund['price']:.2f}"],
+        ["50-Day Moving Avg", f"INR {df['EMA_50'].iloc[-1]:.2f}"],
+        ["200-Day Moving Avg", f"INR {df['EMA_200'].iloc[-1]:.2f}"],
+        ["RSI (Momentum)", f"{df['RSI'].iloc[-1]:.1f}"],
+        ["MACD Signal", "BULLISH" if df['MACD_12_26_9'].iloc[-1] > df['MACDs_12_26_9'].iloc[-1] else "BEARISH"]
+    ]
+    
+    for row in metrics:
+        pdf.cell(95, 10, row[0], 1, 0, 'L', 1)
+        pdf.cell(95, 10, row[1], 1, 1, 'L', 0)
+    
+    pdf.ln(10)
+    
+    # 3. EMBED CHART (The Magic Step)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Price Trend & Technicals", 0, 1)
+    
+    # Save Plotly figure to a temp image file
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+        fig.write_image(tmpfile.name, scale=2) # scale=2 for high res
+        pdf.image(tmpfile.name, x=10, w=190)
+    
+    pdf.ln(5)
+    
+    # 4. AI SIGNALS LIST
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Key Technical Signals", 0, 1)
+    pdf.set_font("Arial", "", 11)
+    
+    for s in fund['signals']:
+        # Bullet point symbol
+        pdf.cell(5, 8, chr(149), 0, 0)
+        pdf.cell(0, 8, s, 0, 1)
+
+    return pdf.output(dest="S").encode("latin-1")
+
+# ==========================================
+# 4. DATA & CHART ENGINE
 # ==========================================
 @st.cache_data(ttl=3600)
-def get_data_pro(symbol):
-    # Clean symbol: TwelveData uses "RELIANCE" not "RELIANCE.NS" for India
-    clean_symbol = symbol.replace(".NS", "").upper()
-    
-    # URL construction
+def get_data(symbol):
+    clean_symbol = symbol.upper().replace(".NS", "").strip()
     url = f"https://api.twelvedata.com/time_series?symbol={clean_symbol}&interval=1day&outputsize=365&apikey={API_KEY}"
-    
-    # If using Indian stocks, sometimes need to specify exchange, but usually auto-detected
     if "BTC" in clean_symbol: url = f"https://api.twelvedata.com/time_series?symbol=BTC/USD&interval=1day&outputsize=365&apikey={API_KEY}"
     
     try:
         response = requests.get(url).json()
-        
-        if "values" not in response:
-            return None, response.get("message", "Unknown Error")
+        if "values" not in response: return None, "API Error"
             
-        # Parse Data
         df = pd.DataFrame(response['values'])
         df['datetime'] = pd.to_datetime(df['datetime'])
         df = df.set_index('datetime').sort_index()
         df = df.rename(columns={"close": "Close", "open": "Open", "high": "High", "low": "Low", "volume": "Volume"})
         df = df.astype(float)
         
-        # Calculate Indicators
+        # Technicals
         df['RSI'] = ta.rsi(df['Close'], length=14)
+        df['EMA_50'] = ta.ema(df['Close'], length=50)
         df['EMA_200'] = ta.ema(df['Close'], length=200)
         macd = ta.macd(df['Close'])
         df = pd.concat([df, macd], axis=1)
         
+        # Verdict
+        score = 0
+        signals = []
+        last = df.iloc[-1]
+        
+        if last['Close'] > last['EMA_200']: score += 2; signals.append("Price > 200 EMA (Long Term Uptrend)")
+        else: score -= 2; signals.append("Price < 200 EMA (Long Term Downtrend)")
+        
+        if last['MACD_12_26_9'] > last['MACDs_12_26_9']: score += 1; signals.append("MACD Bullish Crossover")
+        
+        verdict = "STRONG BUY" if score >= 2 else "SELL" if score <= -2 else "HOLD"
+        
         fund = {
             "name": clean_symbol,
-            "price": df['Close'].iloc[-1],
-            "pe": "N/A (API Limit)", # Basic tier doesn't give P/E
-            "news": "Market data fetched successfully."
+            "price": last['Close'],
+            "change": (last['Close'] - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100,
+            "verdict": verdict,
+            "signals": signals
         }
         return df, fund
-    except Exception as e:
-        return None, str(e)
+    except Exception as e: return None, str(e)
 
 # ==========================================
-# 4. REPORT ENGINE
-# ==========================================
-class PDF(FPDF):
-    def header(self):
-        self.set_font('Arial', 'B', 20)
-        self.cell(0, 10, 'StockOracle Pro Report', 0, 1, 'C')
-        self.ln(10)
-
-def create_pdf(ticker, fund, hist, tier):
-    pdf = PDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 10, f"Asset: {ticker} | Price: {fund['price']:.2f}", 0, 1)
-    
-    if tier == "Pro":
-        pdf.ln(10)
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "PRO: Technical Analysis", 0, 1)
-        pdf.set_font("Arial", "", 12)
-        pdf.cell(0, 10, f"- RSI (14): {hist['RSI'].iloc[-1]:.2f}", 0, 1)
-        
-        macd_val = hist['MACD_12_26_9'].iloc[-1]
-        signal = "BULLISH" if macd_val > 0 else "BEARISH"
-        pdf.cell(0, 10, f"- MACD Signal: {macd_val:.2f} ({signal})", 0, 1)
-    else:
-        pdf.ln(20)
-        pdf.set_font("Arial", "I", 10)
-        pdf.cell(0, 10, "Upgrade to PRO for Technical Indicators.", 0, 1, 'C')
-    return pdf.output(dest="S").encode("latin-1")
-
-# ==========================================
-# 5. MAIN UI
+# 5. UI & LOGIC
 # ==========================================
 if not st.session_state.logged_in:
-    login_screen()
+    c1, c2, c3 = st.columns([1,1.5,1])
+    with c2:
+        st.title("📈 StockOracle Ultimate")
+        if st.button("🚀 Continue as Guest (Skip Login)"):
+            st.session_state.logged_in = True
+            st.session_state.user_tier = "Free"
+            st.rerun()
 else:
+    # SIDEBAR
     with st.sidebar:
-        st.title(f"👤 {st.session_state.username}")
-        st.caption(f"Plan: {st.session_state.user_tier}")
-        
+        st.title("📊 Control")
+        st.write(f"Tier: **{st.session_state.user_tier}**")
         if st.session_state.user_tier == "Free":
-            if st.button("💎 Upgrade to PRO"):
-                with st.spinner("Upgrading..."):
+            if st.button("💎 Unlock Pro Reports"):
+                with st.spinner("Processing..."):
                     time.sleep(1)
                     st.session_state.user_tier = "Pro"
                     st.rerun()
-            
-            # SIDEBAR AD
-            st.markdown("---")
-            st.info("💡 **Go Ad-Free?**")
-            st.markdown("[**Open Zero-Brokerage Account**](https://zerodha.com/open-account)")
-        else:
-            if st.button("Downgrade to Free"):
-                st.session_state.user_tier = "Free"
-                st.rerun()
-        if st.button("Logout"): logout()
+        if st.button("Logout"):
+            st.session_state.logged_in = False
+            st.rerun()
 
-    # DASHBOARD
-    st.title("🔮 StockOracle SaaS")
+    # MAIN
+    st.title("📈 StockOracle: Market Terminal")
     
-    # TOP AD (Free Only)
-    if st.session_state.user_tier == "Free":
-        st.markdown("""
-        <a href="https://zerodha.com/open-account" target="_blank" style="text-decoration:none;">
-            <div class="ad-banner">
-                <div style="color:#FFD700; font-weight:bold; font-size:18px;">📢 OPEN DEMAT ACCOUNT: Get ₹0 Brokerage + Free Tools</div>
-                <small style="color:#CCC">Sponsored Ad • Click to Support Us</small>
-            </div>
-        </a>
-        """, unsafe_allow_html=True)
-
-    # INPUT
-    symbol = st.text_input("Enter Symbol (e.g. RELIANCE, TCS, BTC/USD):", "RELIANCE").upper()
-
-    if st.button("Analyze"):
-        if API_KEY == "YOUR_API_KEY_HERE":
-            st.error("⚠️ Setup Error: You need to paste your Twelve Data API Key in the code first.")
-        else:
-            df, fund = get_data_pro(symbol)
+    symbol = st.text_input("Search Symbol:", "RELIANCE").upper()
+    
+    if st.button("Analyze Stock"):
+        with st.spinner("Analyzing..."):
+            df, fund = get_data(symbol)
             
             if df is not None:
-                # 1. Price
-                st.subheader(f"{fund['name']} - {fund['price']:.2f}")
+                # 1. METRICS
+                m1, m2, m3 = st.columns(3)
+                m1.metric(fund['name'], f"{fund['price']:.2f}", f"{fund['change']:.2f}%")
+                m2.metric("RSI", f"{df['RSI'].iloc[-1]:.0f}")
+                m3.metric("Verdict", fund['verdict'])
                 
-                # 2. Chart
+                # 2. PLOTLY CHART
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Price', line=dict(color='#00CC96')))
+                fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
+                fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange'), name='50 EMA'))
+                fig.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], line=dict(color='blue'), name='200 EMA'))
+                fig.update_layout(
+                    height=500, 
+                    template="plotly_white", # White background looks better in PDF
+                    title=f"{fund['name']} - Technical Analysis",
+                    margin=dict(l=40, r=40, t=40, b=40)
+                )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # 3. PRO Features
+                # 3. PDF DOWNLOAD
                 st.divider()
-                if st.session_state.user_tier == "Pro":
-                    st.subheader("💎 PRO Analysis")
-                    c1, c2 = st.columns(2)
-                    c1.metric("RSI", f"{df['RSI'].iloc[-1]:.2f}")
-                    c2.metric("MACD", f"{df['MACD_12_26_9'].iloc[-1]:.2f}")
-                else:
-                    st.subheader("💎 PRO Analysis (Locked)")
-                    st.markdown("""
-                    <div class="lock-box">
-                        <h3>🔒 Advanced Analytics Locked</h3>
-                        <p>Upgrade to PRO to unlock RSI & MACD Signals.</p>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                # 4. Report
-                st.divider()
-                pdf = create_pdf(symbol, fund, df, st.session_state.user_tier)
-                st.download_button("📥 Download Report", pdf, "report.pdf", "application/pdf")
+                st.subheader("📄 Institutional Report")
                 
+                if st.session_state.user_tier == "Pro":
+                    pdf_data = create_pro_report(symbol, fund, df, fig)
+                    st.download_button("📥 Download Pro PDF (With Charts)", pdf_data, f"{symbol}_Pro_Report.pdf", "application/pdf")
+                else:
+                    st.warning("🔒 Charts inside PDF are a PRO feature.")
+                    st.button("Upgrade to Unlock")
             else:
-                st.error(f"Error fetching data: {fund}")
-                st.info("Tip: For India, use just 'RELIANCE' (No .NS). For Crypto, use 'BTC/USD'.")
+                st.error("Data not found. Try 'RELIANCE' or 'BTC/USD'")

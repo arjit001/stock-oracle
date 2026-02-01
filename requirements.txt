@@ -1,5 +1,4 @@
 streamlit
-yfinance>=0.2.40
 pandas
 pandas_ta
 numpy
@@ -7,3 +6,5 @@ requests
 fpdf
 textblob
 plotly
+kaleido
+scikit-learn

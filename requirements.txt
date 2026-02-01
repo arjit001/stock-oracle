@@ -3,10 +3,7 @@ yfinance>=0.2.40
 pandas
 pandas_ta
 numpy
-plotly
-scikit-learn
 requests
 fpdf
 textblob
-streamlit-authenticator
-pyyaml
+plotly

@@ -3,7 +3,6 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 import plotly.graph_objects as go
-from sklearn.ensemble import RandomForestRegressor
 from datetime import datetime, timedelta
 import yfinance as yf
 from nsepython import equity_history
@@ -11,26 +10,32 @@ from nsepython import equity_history
 # ==========================================
 # 1. CONFIG & STYLES
 # ==========================================
-st.set_page_config(layout="wide", page_title="StockOracle Trader", page_icon="📊")
+st.set_page_config(layout="wide", page_title="StockOracle Workspace", page_icon="🖥️")
 
-# Watchlist State
-if 'watchlist' not in st.session_state:
-    st.session_state.watchlist = ["RELIANCE.NS", "ZOMATO.NS", "TATAMOTORS.NS"]
+# Initialize Session State for Paper Trading
+if 'paper_portfolio' not in st.session_state:
+    st.session_state.paper_portfolio = []
 
 st.markdown("""
 <style>
     .stApp { background-color: #0e1117; color: #fff; }
-    /* SIGNAL BOXES */
-    .signal-card { background: #1f2937; padding: 20px; border-radius: 10px; border-left: 5px solid #555; margin-bottom: 20px; }
-    .buy-border { border-left-color: #00CC96 !important; }
-    .sell-border { border-left-color: #FF4B4B !important; }
-    .wait-border { border-left-color: #FFD700 !important; }
-    
-    /* TEXT HIGHLIGHTS */
-    .big-verdict { font-size: 28px; font-weight: bold; margin-bottom: 5px; }
-    .reason-list { font-size: 14px; color: #ccc; line-height: 1.6; }
-    .reason-good { color: #00CC96; }
-    .reason-bad { color: #FF4B4B; }
+    .glass-card {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 15px;
+    }
+    .bullish-text { color: #00CC96; font-weight: bold; }
+    .bearish-text { color: #FF4B4B; font-weight: bold; }
+    .pattern-tag {
+        background-color: #333;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        margin-right: 5px;
+        border: 1px solid #555;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -78,72 +83,81 @@ def get_data(query):
     if df is None or df.empty:
         return None, None, f"Data not found for {symbol}"
 
-    # --- INDICATORS & STRATEGY ---
+    # --- TECHNICALS ---
     df['EMA_50'] = ta.ema(df['Close'], length=50)
     df['EMA_200'] = ta.ema(df['Close'], length=200)
     df['RSI'] = ta.rsi(df['Close'], length=14)
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-    df['VWAP'] = (df['Volume'] * (df['High'] + df['Low'] + df['Close']) / 3).cumsum() / df['Volume'].cumsum()
-
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
     
     # Pivot Points
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
     pivot = (prev['High'] + prev['Low'] + prev['Close']) / 3
     r1 = (2 * pivot) - prev['Low']
     s1 = (2 * pivot) - prev['High']
     
-    # --- LOGIC ENGINE ---
-    reasons = []
-    score = 0
+    # --- PATTERN RECOGNITION (Custom Logic) ---
+    patterns = []
     
-    # 1. Trend Analysis
-    if last['Close'] > pivot:
-        score += 1
-        reasons.append(("✅", "Price is ABOVE daily Pivot Point (Bullish)"))
-    else:
-        score -= 1
-        reasons.append(("❌", "Price is BELOW daily Pivot Point (Bearish)"))
+    # 1. Hammer (Bullish Reversal)
+    # Body is small, Lower shadow is 2x body, Upper shadow is tiny
+    body = abs(last['Close'] - last['Open'])
+    lower_shadow = last['Open'] - last['Low'] if last['Close'] > last['Open'] else last['Close'] - last['Low']
+    upper_shadow = last['High'] - last['Close'] if last['Close'] > last['Open'] else last['High'] - last['Open']
+    
+    if lower_shadow > (2 * body) and upper_shadow < (0.5 * body):
+        patterns.append("🔨 Hammer (Bullish)")
         
+    # 2. Shooting Star (Bearish Reversal)
+    # Upper shadow 2x body, Lower shadow tiny
+    if upper_shadow > (2 * body) and lower_shadow < (0.5 * body):
+        patterns.append("☄️ Shooting Star (Bearish)")
+        
+    # 3. Bullish Engulfing
+    # Today green, yesterday red, today completely covers yesterday
+    prev_body = abs(prev['Close'] - prev['Open'])
+    if last['Close'] > last['Open'] and prev['Close'] < prev['Open']: # Green after Red
+        if last['Close'] > prev['Open'] and last['Open'] < prev['Close']:
+            patterns.append("🕯️ Bullish Engulfing")
+
+    # --- SIGNAL GENERATION ---
+    score = 0
+    reasons = []
+    
+    # Pivot Check
+    if last['Close'] > pivot: 
+        score += 1
+        reasons.append("Above Pivot")
+    else: 
+        score -= 1
+        reasons.append("Below Pivot")
+        
+    # Trend Check
     if last['Close'] > df['EMA_200'].iloc[-1]:
         score += 1
-        reasons.append(("✅", "Long-term Trend is UP (>200 EMA)"))
-    else:
-        score -= 1
-        reasons.append(("❌", "Long-term Trend is DOWN (<200 EMA)"))
-        
-    # 2. Momentum
-    if last['RSI'] < 30:
-        score += 1
-        reasons.append(("⚠️", "RSI is Oversold (Potential Bounce)"))
-    elif last['RSI'] > 70:
-        score -= 1
-        reasons.append(("⚠️", "RSI is Overbought (Caution)"))
-    else:
-        reasons.append(("ℹ️", f"RSI is Neutral ({last['RSI']:.0f})"))
-
-    # 3. Decision
+        reasons.append("Uptrend")
+    
+    # Pattern Bonus
+    if "Bullish" in str(patterns): score += 2
+    if "Bearish" in str(patterns): score -= 2
+    
     atr = df['ATR'].iloc[-1]
+    
     if score >= 2:
-        verdict = "BUY / LONG"
-        style = "buy-border"
-        stop_loss = last['Close'] - (1.5 * atr)
-        target = last['Close'] + (2.0 * atr)
+        verdict = "BUY"
+        color = "#00CC96"
+        sl = last['Close'] - (1.5 * atr)
+        tgt = last['Close'] + (2.5 * atr)
     elif score <= -2:
-        verdict = "SELL / SHORT"
-        style = "sell-border"
-        stop_loss = last['Close'] + (1.5 * atr)
-        target = last['Close'] - (2.0 * atr)
+        verdict = "SELL"
+        color = "#FF4B4B"
+        sl = last['Close'] + (1.5 * atr)
+        tgt = last['Close'] - (2.5 * atr)
     else:
-        verdict = "WAIT / NEUTRAL"
-        style = "wait-border"
-        stop_loss = last['Close'] * 0.99
-        target = last['Close'] * 1.01
-
-    # Risk Reward
-    risk = abs(last['Close'] - stop_loss)
-    reward = abs(target - last['Close'])
-    rr_ratio = reward / risk if risk > 0 else 0
+        verdict = "WAIT"
+        color = "#FFD700"
+        sl = last['Close'] * 0.99
+        tgt = last['Close'] * 1.01
 
     data = {
         "symbol": symbol,
@@ -151,13 +165,13 @@ def get_data(query):
         "currency": "₹" if ".NS" in symbol else "$",
         "change": ((last['Close'] - prev['Close'])/prev['Close']) * 100,
         "verdict": verdict,
-        "style": style,
-        "reasons": reasons,
+        "verdict_color": color,
+        "patterns": patterns,
         "pivot": pivot,
         "r1": r1, "s1": s1,
-        "stop_loss": stop_loss,
-        "target": target,
-        "rr_ratio": rr_ratio,
+        "stop_loss": sl,
+        "target": tgt,
+        "atr": atr,
         "rsi": last['RSI'],
         "source": source
     }
@@ -166,105 +180,101 @@ def get_data(query):
 # ==========================================
 # 3. UI DASHBOARD
 # ==========================================
-st.title("📊 StockOracle: Trade Assistant")
-st.caption("Detailed Analysis • Risk/Reward Calculation • Execution Plan")
+st.title("🖥️ StockOracle: Trader's Workspace")
 
-tab1, tab2 = st.tabs(["🔍 Deep Dive", "📋 Watchlist"])
-
-# --- TAB 1: EXPLAINABLE ANALYSIS ---
-with tab1:
-    c_in, c_go = st.columns([3, 1])
-    with c_in: q = st.text_input("Analyze Asset:", "HCLTECH")
-    with c_go: 
-        if st.button("Generate Plan", type="primary"):
-            st.session_state.run_analysis = True
-
-    if st.session_state.get('run_analysis', False):
-        with st.spinner("Analyzing Market Structure..."):
-            df, data, err = get_data(q)
-            if err:
-                st.error(err)
-            else:
-                # 1. TOP METRICS
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Price", f"{data['currency']} {data['price']:.2f}", f"{data['change']:.2f}%")
-                m2.metric("RSI Strength", f"{data['rsi']:.0f}/100")
-                m3.metric("Risk/Reward", f"1:{data['rr_ratio']:.1f}")
-                m4.metric("Source", data['source'])
-
-                # 2. MAIN STRATEGY CARD
-                st.markdown(f"""
-                <div class="signal-card {data['style']}">
-                    <div class="big-verdict">{data['verdict']}</div>
-                    <div style="margin-bottom:10px; color:#aaa;">Confidence Score based on Trend, Momentum, and Pivot Levels.</div>
-                    <div class="reason-list">
-                        {'<br>'.join([f'<span class="{ "reason-good" if "✅" in r[0] else "reason-bad" if "❌" in r[0] else "" }">{r[0]} {r[1]}</span>' for r in data['reasons']])}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-                # 3. EXECUTION PLAN (The "Profit" Part)
-                c_ex1, c_ex2 = st.columns(2)
-                
-                with c_ex1:
-                    st.subheader("🎯 Trade Setup")
-                    st.info(f"""
-                    **Entry Zone:** Market Price ({data['price']:.2f})
-                    
-                    **⛔ Stop Loss:** {data['stop_loss']:.2f}
-                    *(Exit if price closes below this)*
-                    
-                    **💰 Target:** {data['target']:.2f}
-                    *(Book profit at this level)*
-                    """)
-                
-                with c_ex2:
-                    st.subheader("🔑 Key Levels")
-                    st.write(f"Resistance (R1): **{data['r1']:.2f}**")
-                    st.write(f"Pivot Point: **{data['pivot']:.2f}**")
-                    st.write(f"Support (S1): **{data['s1']:.2f}**")
-                    
-                    # Visual Gauge for RSI
-                    st.write("Momentum Gauge (RSI):")
-                    st.progress(int(data['rsi']))
-                    st.caption("0 = Oversold (Buy) | 100 = Overbought (Sell)")
-
-                # 4. CHART
-                st.subheader("📉 Technical Chart")
-                fig = go.Figure()
-                fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
-                fig.add_hline(y=data['pivot'], line_dash="dash", line_color="yellow", annotation_text="Pivot")
-                fig.add_hline(y=data['stop_loss'], line_color="red", annotation_text="Stop Loss")
-                fig.add_hline(y=data['target'], line_color="green", annotation_text="Target")
-                fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True)
-
-# --- TAB 2: WATCHLIST (Keep existing functionality) ---
-with tab2:
-    st.subheader("Market Watch")
-    new_s = st.text_input("Add to Watchlist:", key="wl_in")
-    if st.button("Add"):
-        if new_s: st.session_state.watchlist.append(parse_symbol(new_s))
+# --- SIDEBAR: PAPER TRADING ---
+with st.sidebar:
+    st.header("📝 Paper Trading")
+    st.caption("Practice without real money")
     
-    st.write("Tracking:")
-    cols = st.columns(5)
-    for i, s in enumerate(st.session_state.watchlist):
-        if cols[i % 5].button(f"❌ {s}"):
-            st.session_state.watchlist.remove(s)
-            st.rerun()
+    # Simple Portfolio Display
+    if st.session_state.paper_portfolio:
+        for trade in st.session_state.paper_portfolio:
+            with st.expander(f"{trade['symbol']} ({trade['side']})"):
+                st.write(f"Entry: {trade['entry']}")
+                st.write(f"Qty: {trade['qty']}")
+                if st.button("Close Trade", key=f"close_{trade['symbol']}"):
+                    st.session_state.paper_portfolio.remove(trade)
+                    st.rerun()
+    else:
+        st.info("No active simulated trades.")
+
+# --- MAIN INPUT ---
+c1, c2 = st.columns([3, 1])
+with c1: query = st.text_input("Analyze Asset:", "TATAMOTORS")
+with c2: 
+    if st.button("Scan Market", type="primary"): st.session_state.scan = True
+
+if st.session_state.get('scan', False):
+    with st.spinner("Scanning Charts & Patterns..."):
+        df, data, err = get_data(query)
+        
+        if err:
+            st.error(err)
+        else:
+            # 1. HEADLINES
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Price", f"{data['currency']} {data['price']:.2f}", f"{data['change']:.2f}%")
+            m2.metric("RSI (14)", f"{data['rsi']:.0f}")
+            m3.metric("Trend", "BULLISH" if data['price'] > df['EMA_200'].iloc[-1] else "BEARISH")
+            m4.markdown(f"<div style='background:{data['verdict_color']}; color:black; padding:10px; border-radius:5px; text-align:center; font-weight:bold;'>{data['verdict']}</div>", unsafe_allow_html=True)
             
-    if st.button("Refresh Table"):
-        rows = []
-        bar = st.progress(0)
-        for i, s in enumerate(st.session_state.watchlist):
-            _, d, e = get_data(s)
-            if d:
-                rows.append({
-                    "Symbol": s, 
-                    "Price": f"{d['price']:.2f}", 
-                    "Action": d['verdict'], 
-                    "R/R": f"1:{d['rr_ratio']:.1f}"
-                })
-            bar.progress((i+1)/len(st.session_state.watchlist))
-        if rows:
-            st.dataframe(pd.DataFrame(rows).style.applymap(lambda v: 'color: #00CC96; font-weight:bold' if 'BUY' in v else 'color: #FF4B4B; font-weight:bold' if 'SELL' in v else '', subset=['Action']), use_container_width=True)
+            # 2. PATTERN & SETUP CARD
+            st.markdown("### 🔍 Technical Setup")
+            c_setup, c_calc = st.columns([1, 1])
+            
+            with c_setup:
+                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                st.subheader("Candlestick Patterns")
+                if data['patterns']:
+                    for p in data['patterns']:
+                        st.markdown(f"<span class='pattern-tag'>{p}</span>", unsafe_allow_html=True)
+                else:
+                    st.write("No major reversal patterns detected today.")
+                
+                st.markdown("---")
+                st.write(f"**Stop Loss:** {data['stop_loss']:.2f}")
+                st.write(f"**Target:** {data['target']:.2f}")
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+            # 3. POSITION SIZING CALCULATOR (New Feature)
+            with c_calc:
+                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+                st.subheader("🧮 Position Size Calculator")
+                capital = st.number_input("Capital Available (₹/$)", value=50000, step=1000)
+                risk_pct = st.slider("Risk per Trade (%)", 1, 5, 2)
+                
+                risk_amount = capital * (risk_pct / 100)
+                risk_per_share = abs(data['price'] - data['stop_loss'])
+                
+                if risk_per_share > 0:
+                    qty = int(risk_amount / risk_per_share)
+                    total_value = qty * data['price']
+                    
+                    st.write(f"Risk Amount: **{data['currency']} {risk_amount:.0f}**")
+                    st.markdown(f"### Buy **{qty}** Shares")
+                    st.caption(f"Total Value: {data['currency']} {total_value:.0f}")
+                    
+                    # PAPER TRADE BUTTON
+                    if st.button("Simulate This Trade"):
+                        st.session_state.paper_portfolio.append({
+                            "symbol": data['symbol'],
+                            "side": data['verdict'],
+                            "entry": data['price'],
+                            "qty": qty
+                        })
+                        st.success(f"Added {qty} {data['symbol']} to Paper Portfolio!")
+                else:
+                    st.warning("Stop Loss too close to Price.")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            # 4. CHART
+            fig = go.Figure()
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
+            fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], line=dict(color='orange', width=1), name='50 EMA'))
+            fig.add_hline(y=data['pivot'], line_dash="dash", line_color="white", annotation_text="Pivot")
+            fig.add_hline(y=data['stop_loss'], line_color="red", annotation_text="SL")
+            fig.add_hline(y=data['target'], line_color="green", annotation_text="TGT")
+            
+            fig.update_layout(height=500, template="plotly_dark", title=f"{data['symbol']} Trading View", xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig, use_container_width=True)

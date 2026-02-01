@@ -16,13 +16,13 @@ from nsepython import equity_history
 # ==========================================
 st.set_page_config(layout="wide", page_title="StockOracle Master", page_icon="📈")
 
-# SMART SYMBOL DICTIONARY (Helps finding Zomato, Bitcoin, etc.)
+# SMART SYMBOL MAP (Maps common names to Tickers)
 STOCK_MAP = {
-    "RELIANCE IND": "RELIANCE.NS", "TATA MOTORS": "TATAMOTORS.NS", "SBI": "SBIN.NS",
+    "RELIANCE": "RELIANCE.NS", "TATA MOTORS": "TATAMOTORS.NS", "SBI": "SBIN.NS",
     "ZOMATO": "ZOMATO.NS", "PAYTM": "PAYTM.NS", "HDFC BANK": "HDFCBANK.NS",
-    "INFOSYS": "INFY.NS", "ITC": "ITC.NS", "TCS": "TCS.NS",
-    "APPLE": "AAPL", "TESLA": "TSLA", "GOOGLE": "GOOGL", "MICROSOFT": "MSFT",
-    "BITCOIN": "BTC-USD", "ETHEREUM": "ETH-USD", "GOLD": "GC=F"
+    "INFOSYS": "INFY.NS", "ITC": "ITC.NS", "TCS": "TCS.NS", "BAJFINANCE": "BAJFINANCE.NS",
+    "APPLE": "AAPL", "TESLA": "TSLA", "GOOGLE": "GOOGL", "MICROSOFT": "MSFT", "NVIDIA": "NVDA",
+    "BITCOIN": "BTC-USD", "ETHEREUM": "ETH-USD", "SOLANA": "SOL-USD"
 }
 
 st.markdown("""
@@ -45,56 +45,73 @@ st.markdown("""
         cursor: pointer;
         margin-bottom: 20px;
     }
+    /* Green/Red Text for Table */
+    .bullish { color: #00CC96; font-weight: bold; }
+    .bearish { color: #FF4B4B; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. HYBRID DATA ENGINE (Yahoo -> NSE Fallback)
+# 2. INTELLIGENT DATA ENGINE
 # ==========================================
 @st.cache_data(ttl=300)
 def get_stock_data(query):
-    # 1. Resolve Symbol from Dictionary or Input
+    # 1. Resolve Symbol
+    # If user typed "Apple", map to "AAPL". If "Reliance", map to "RELIANCE.NS"
     symbol = STOCK_MAP.get(query.upper(), query.upper())
-    
-    # 2. Determine Attributes
-    is_india = ".NS" in symbol or (symbol.isalpha() and len(symbol) < 10 and "-" not in symbol)
-    if is_india and not symbol.endswith(".NS"): symbol = f"{symbol}.NS"
-    currency = "₹" if is_india else "$"
     
     df = None
     source = ""
     error = None
-
-    # --- ATTEMPT 1: YAHOO FINANCE (Global) ---
+    
+    # 2. ATTEMPT 1: Try Symbol AS IS (Good for AAPL, BTC-USD, ZOMATO.NS)
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="2y")
         if not df.empty:
             source = "Yahoo Finance"
-    except Exception as e:
-        error = str(e)
+    except:
+        pass
 
-    # --- ATTEMPT 2: NSE PYTHON (India Only Fallback) ---
-    if (df is None or df.empty) and is_india:
+    # 3. ATTEMPT 2: Try appending .NS (If 'RELIANCE' failed, try 'RELIANCE.NS')
+    if (df is None or df.empty) and not symbol.endswith(".NS") and "-" not in symbol:
         try:
-            clean_sym = symbol.replace(".NS", "")
-            series = equity_history(clean_sym, "EQ", "01-01-2024", datetime.now().strftime("%d-%m-%Y"))
-            if series and len(series) > 5:
-                df = pd.DataFrame(series)
-                df = df.rename(columns={'CH_TIMESTAMP': 'Date', 'CH_CLOSING_PRICE': 'Close', 
-                                      'CH_OPENING_PRICE': 'Open', 'CH_TRADE_HIGH_PRICE': 'High', 
-                                      'CH_TRADE_LOW_PRICE': 'Low', 'CH_TOT_TRADED_QTY': 'Volume'})
-                df['Date'] = pd.to_datetime(df['Date'])
-                df = df.set_index('Date').sort_index()
-                df = df.astype(float)
-                source = "NSE Direct (Fallback)"
-        except Exception as e:
-            error = str(e)
+            india_symbol = f"{symbol}.NS"
+            ticker = yf.Ticker(india_symbol)
+            df = ticker.history(period="2y")
+            if not df.empty:
+                symbol = india_symbol # Update symbol
+                source = "Yahoo Finance (India)"
+        except:
+            pass
+
+    # 4. ATTEMPT 3: NSE PYTHON (If Yahoo blocked Indian stock)
+    # Only try this if it looks like an Indian stock (no hyphen, no .NS suffix needed for NSEPython)
+    if (df is None or df.empty):
+        clean_sym = symbol.replace(".NS", "")
+        # Heuristic: NSE codes are usually uppercase letters, no numbers/hyphens
+        if clean_sym.isalpha():
+            try:
+                series = equity_history(clean_sym, "EQ", "01-01-2024", datetime.now().strftime("%d-%m-%Y"))
+                if series and len(series) > 5:
+                    df = pd.DataFrame(series)
+                    df = df.rename(columns={'CH_TIMESTAMP': 'Date', 'CH_CLOSING_PRICE': 'Close', 
+                                          'CH_OPENING_PRICE': 'Open', 'CH_TRADE_HIGH_PRICE': 'High', 
+                                          'CH_TRADE_LOW_PRICE': 'Low', 'CH_TOT_TRADED_QTY': 'Volume'})
+                    df['Date'] = pd.to_datetime(df['Date'])
+                    df = df.set_index('Date').sort_index()
+                    df = df.astype(float)
+                    source = "NSE Direct (Fallback)"
+            except:
+                pass
 
     if df is None or df.empty:
-        return None, None, f"Could not find data for '{query}'. Try the full symbol (e.g. ZOMATO.NS)."
+        return None, None, f"Could not find data for '{query}'. Try the exact ticker (e.g., RELIANCE.NS, AAPL)."
 
-    # 3. DETAILED ANALYSIS
+    # 5. DETAILED ANALYSIS
+    # Currency
+    currency = "₹" if ".NS" in symbol or source == "NSE Direct (Fallback)" else "$"
+    
     # Technicals
     df['RSI'] = ta.rsi(df['Close'], length=14)
     df['EMA_50'] = ta.ema(df['Close'], length=50)
@@ -102,9 +119,9 @@ def get_stock_data(query):
     macd = ta.macd(df['Close'])
     df = pd.concat([df, macd], axis=1)
 
-    # Calculate Support/Resistance (Simple 20-day High/Low)
-    support = df['Low'].tail(20).min()
-    resistance = df['High'].tail(20).max()
+    # Support/Resistance
+    support = df['Low'].tail(50).min()
+    resistance = df['High'].tail(50).max()
 
     # Signals
     last = df.iloc[-1]
@@ -117,19 +134,13 @@ def get_stock_data(query):
     else: 
         score -= 2; signals.append("Trend: Bearish (<200 EMA)")
         
-    # Golden Cross
-    if last['EMA_50'] > last['EMA_200']: signals.append("Pattern: Golden Cross (Strong Buy)")
-    
     # Momentum
     if last['RSI'] < 30: score += 1; signals.append("RSI: Oversold (Buy Dip)")
     elif last['RSI'] > 70: score -= 1; signals.append("RSI: Overbought (Caution)")
     
-    # Volume Spike
-    avg_vol = df['Volume'].tail(20).mean()
-    if last['Volume'] > 1.5 * avg_vol: signals.append("Volume: High Buying Pressure")
-
     # Verdict
     if score >= 2: verdict = "STRONG BUY 🚀"
+    elif score >= 1: verdict = "BUY 📈"
     elif score <= -2: verdict = "SELL 🔻"
     else: verdict = "HOLD ✋"
 
@@ -170,6 +181,8 @@ def predict_60_days(df):
 
 def create_html_report(fund, df, prediction_data):
     target = prediction_data[1][-1]
+    upside = ((target - fund['price']) / fund['price']) * 100
+    
     html = f"""
     <html><body style="font-family:sans-serif; padding:30px; color:#333;">
         <div style="border-bottom:2px solid #333; padding-bottom:10px;">
@@ -177,30 +190,28 @@ def create_html_report(fund, df, prediction_data):
             <p style="margin:5px 0; color:#666;">Generated by StockOracle | Source: {fund['source']}</p>
         </div>
         <div style="background:{'#e6fffa' if 'BUY' in fund['verdict'] else '#fff5f5'}; padding:20px; border-left:5px solid #333; margin:20px 0;">
-            <h2 style="margin:0;">AI VERDICT: {fund['verdict']}</h2>
+            <h2 style="margin:0;">VERDICT: {fund['verdict']}</h2>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:20px;">
             <div style="background:#f4f4f4; padding:15px; border-radius:5px;"><b>Current Price:</b> {fund['currency']} {fund['price']:.2f}</div>
-            <div style="background:#f4f4f4; padding:15px; border-radius:5px;"><b>60-Day Target:</b> {fund['currency']} {target:.2f}</div>
+            <div style="background:#f4f4f4; padding:15px; border-radius:5px;"><b>Target (60D):</b> {fund['currency']} {target:.2f}</div>
+            <div style="background:#f4f4f4; padding:15px; border-radius:5px;"><b>Potential Gain:</b> {upside:.2f}%</div>
             <div style="background:#f4f4f4; padding:15px; border-radius:5px;"><b>Support:</b> {fund['support']:.2f}</div>
-            <div style="background:#f4f4f4; padding:15px; border-radius:5px;"><b>Resistance:</b> {fund['resistance']:.2f}</div>
         </div>
-        <h3>Technical Signals</h3>
+        <h3>Analysis</h3>
         <ul>{''.join([f'<li>{s}</li>' for s in fund['signals']])}</ul>
     </body></html>
     """
     return html
 
 # ==========================================
-# 4. UI: SIDEBAR & MAIN
+# 4. UI SETUP
 # ==========================================
 with st.sidebar:
     st.title("📊 Settings")
     
-    # SMART SEARCH DICTIONARY
-    st.subheader("🔍 Quick Find")
-    quick_select = st.selectbox("Popular Stocks:", ["Select...", "ZOMATO", "TATA MOTORS", "RELIANCE IND", "BITCOIN", "APPLE"])
-    
+    # QUICK SELECTOR
+    quick_select = st.selectbox("Quick Select:", ["Select...", "ZOMATO", "RELIANCE", "TATA MOTORS", "APPLE", "TESLA", "BITCOIN"])
     if quick_select != "Select...":
         st.session_state.selected_stock = quick_select
     
@@ -211,7 +222,6 @@ with st.sidebar:
     if st.session_state.user_tier == "Guest":
         if st.button("💎 Unlock Pro"): st.session_state.user_tier = "Pro"; st.rerun()
 
-# MAIN DASHBOARD
 st.title("📈 StockOracle: Master Edition")
 
 if st.session_state.user_tier == "Guest":
@@ -223,83 +233,113 @@ if st.session_state.user_tier == "Guest":
     """, unsafe_allow_html=True)
 
 # Tabs
-tab1, tab2 = st.tabs(["🔍 Deep Analysis", "⚖️ Comparison (Max 8)"])
+tab1, tab2 = st.tabs(["🔍 Analysis", "📊 Comparison Table (Pro)"])
 
-# --- TAB 1: ANALYSIS ---
+# --- TAB 1: INDIVIDUAL ANALYSIS ---
 with tab1:
-    # Input Logic (Syncs with Sidebar)
     default = st.session_state.get('selected_stock', 'RELIANCE')
-    query = st.text_input("Enter Symbol or Name (e.g., Zomato, Bitcoin):", value=default)
+    query = st.text_input("Enter Symbol (e.g. Zomato, AAPL, BTC-USD):", value=default)
 
     if st.button("🚀 Analyze", type="primary"):
-        with st.spinner("Analyzing Market Data..."):
+        with st.spinner("Crunching Numbers..."):
             df, fund, error = get_stock_data(query)
             
             if error:
                 st.error(error)
             else:
-                # 1. METRICS
+                # METRICS
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Price", f"{fund['currency']} {fund['price']:.2f}", f"{fund['change']:.2f}%")
-                c2.metric("Target (60D)", f"{fund['currency']} {predict_60_days(df)[1][-1]:.2f}")
-                c3.metric("Support", f"{fund['support']:.2f}")
-                c4.metric("Resistance", f"{fund['resistance']:.2f}")
+                target_price = predict_60_days(df)[1][-1]
+                upside = ((target_price - fund['price']) / fund['price']) * 100
+                c2.metric("Target (60D)", f"{fund['currency']} {target_price:.0f}", f"{upside:.1f}%")
+                c3.metric("Support", f"{fund['support']:.0f}")
+                c4.metric("Resistance", f"{fund['resistance']:.0f}")
 
-                # 2. CHART
+                # CHART
                 f_dates, f_prices = predict_60_days(df)
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
                 fig.add_trace(go.Scatter(x=f_dates, y=f_prices, name='Forecast', line=dict(color='#ab47bc', width=2, dash='dot')))
-                fig.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], name='200 EMA (Trend)', line=dict(color='blue', width=1)))
+                fig.add_trace(go.Scatter(x=df.index, y=df['EMA_200'], name='Trend (200 EMA)', line=dict(color='blue', width=1)))
                 fig.update_layout(height=500, template="plotly_dark", title=f"{fund['name']} ({fund['source']})", xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
 
-                # 3. DETAILED SIGNALS
+                # REPORT
                 c_left, c_right = st.columns([1, 1])
                 with c_left:
                     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                    st.subheader("🤖 AI Analysis")
-                    st.markdown(f"**Verdict:** {fund['verdict']}")
-                    st.markdown(f"**Volatility:** {fund['volatility']}")
+                    st.subheader("🤖 AI Verdict")
+                    st.markdown(f"### {fund['verdict']}")
                     for s in fund['signals']: st.write(f"• {s}")
                     st.markdown('</div>', unsafe_allow_html=True)
                 
                 with c_right:
                     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-                    st.subheader("📄 Report")
+                    st.subheader("📄 Download Report")
                     html = create_html_report(fund, df, (f_dates, f_prices))
                     b64 = base64.b64encode(html.encode()).decode()
-                    href = f'<a href="data:text/html;base64,{b64}" download="{fund["name"]}_Report.html" style="text-decoration:none; color:white; background:#00CC96; padding:10px 20px; border-radius:5px; font-weight:bold;">📥 Download Full Report</a>'
+                    href = f'<a href="data:text/html;base64,{b64}" download="{fund["name"]}_Report.html" style="text-decoration:none; color:white; background:#00CC96; padding:10px 20px; border-radius:5px; font-weight:bold;">📥 Download HTML Report</a>'
                     
                     if st.session_state.user_tier == "Pro":
                         st.markdown(href, unsafe_allow_html=True)
                     else:
-                        st.warning("🔒 Locked")
+                        st.warning("🔒 Locked (Guest)")
                         st.button("Unlock")
                     st.markdown('</div>', unsafe_allow_html=True)
 
-# --- TAB 2: COMPARISON ---
+# --- TAB 2: COMPARISON TABLE (Requested Feature) ---
 with tab2:
-    st.subheader("Compare Assets")
-    # Multi-Select with Auto-fill dictionary
-    options = list(STOCK_MAP.keys()) + ["RELIANCE.NS", "TCS.NS", "AAPL", "BTC-USD"]
-    selected = st.multiselect("Select up to 8 Stocks:", options, default=["RELIANCE IND", "TATA MOTORS"])
+    st.subheader("📊 Multi-Asset Comparison")
     
-    if st.button("Run Comparison"):
-        if len(selected) > 8:
-            st.error("Please select 8 or fewer stocks.")
+    # 1. Selection
+    options = ["RELIANCE", "TATA MOTORS", "ZOMATO", "APPLE", "TESLA", "BITCOIN", "HDFC BANK", "INFOSYS"]
+    selected = st.multiselect("Select stocks to compare:", options, default=["RELIANCE", "APPLE"])
+    
+    if st.button("Generate Comparison Table"):
+        if not selected:
+            st.error("Select at least one stock.")
         else:
-            comp_df = pd.DataFrame()
+            table_data = []
             progress = st.progress(0)
             
-            for i, stock_name in enumerate(selected):
-                # Use the same smart getter
-                d, _, _ = get_stock_data(stock_name)
+            for i, stock in enumerate(selected):
+                d, f, e = get_stock_data(stock)
                 if d is not None:
-                    # Normalize: (Price / Start_Price - 1) * 100
-                    norm = (d['Close'] / d['Close'].iloc[0] - 1) * 100
-                    comp_df[stock_name] = norm
+                    # Calculate Upside
+                    target = predict_60_days(d)[1][-1]
+                    upside = ((target - f['price']) / f['price']) * 100
+                    
+                    # Row Data
+                    table_data.append({
+                        "Symbol": f['name'],
+                        "Price": f"{f['currency']} {f['price']:.2f}",
+                        "Verdict": f['verdict'],
+                        "Target (60D)": f"{f['currency']} {target:.2f}",
+                        "Potential Gain": f"{upside:.2f}%",
+                        "Source": f['source']
+                    })
                 progress.progress((i + 1) / len(selected))
             
-            st.line_chart(comp_df)
-            st.caption("Chart shows percentage growth (%) over the last 2 years.")
+            # 2. Display Table
+            if table_data:
+                res_df = pd.DataFrame(table_data)
+                
+                # Apply Color Formatting
+                def highlight_verdict(val):
+                    color = '#00CC96' if 'BUY' in val else '#FF4B4B' if 'SELL' in val else 'white'
+                    return f'color: {color}; font-weight: bold'
+                
+                def highlight_gain(val):
+                    val_num = float(val.replace('%', ''))
+                    color = '#00CC96' if val_num > 0 else '#FF4B4B'
+                    return f'color: {color}'
+
+                st.dataframe(
+                    res_df.style.map(highlight_verdict, subset=['Verdict'])
+                                .map(highlight_gain, subset=['Potential Gain']),
+                    use_container_width=True,
+                    height=400
+                )
+            else:
+                st.error("No data fetched.")

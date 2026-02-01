@@ -19,11 +19,7 @@ st.markdown("""
 <style>
     /* Dark Theme Optimization */
     .stApp { background-color: #0e1117; color: #ffffff; }
-    
-    /* Metrics Styling */
     div[data-testid="stMetricValue"] { font-size: 24px; color: #00CC96; }
-    
-    /* Card UI */
     .glass-card {
         background: rgba(255, 255, 255, 0.05);
         border: 1px solid rgba(255, 255, 255, 0.1);
@@ -31,8 +27,6 @@ st.markdown("""
         padding: 20px;
         margin-bottom: 15px;
     }
-    
-    /* Ad Banner */
     .ad-banner {
         background: linear-gradient(90deg, #1a1a1a, #333);
         border: 1px dashed #FFD700;
@@ -46,27 +40,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. ROBUST DATA ENGINE (Indian Stock Fix)
+# 2. ROBUST DATA ENGINE (Native Fix)
 # ==========================================
 @st.cache_data(ttl=300)
 def get_stock_data(symbol):
     # 1. Force NSE Extension for India
-    # If user types "TATASTEEL", we make it "TATASTEEL.NS"
-    # If they type "BTC-USD", we leave it alone.
     if not symbol.endswith(".NS") and not "-" in symbol:
         symbol = f"{symbol}.NS"
     
-    # Currency Symbol Logic
     currency = "₹" if ".NS" in symbol else "$"
 
     try:
-        # 2. Stealth Request (Mimics a Browser to avoid blocking)
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
-        })
-        
-        ticker = yf.Ticker(symbol, session=session)
+        # 2. NATIVE REQUEST (Fixed: Removed Manual Session)
+        # We let yfinance handle the headers internally to avoid the curl_cffi error
+        ticker = yf.Ticker(symbol)
         df = ticker.history(period="2y")
         
         if df.empty:
@@ -75,7 +62,6 @@ def get_stock_data(symbol):
         # 3. Technical Analysis
         df['RSI'] = ta.rsi(df['Close'], length=14)
         
-        # Handling New Stocks (Less than 200 days)
         if len(df) > 200:
             df['EMA_50'] = ta.ema(df['Close'], length=50)
             df['EMA_200'] = ta.ema(df['Close'], length=200)
@@ -109,9 +95,14 @@ def get_stock_data(symbol):
         # 5. Volatility & Info
         vol = df['Close'].pct_change().std() * np.sqrt(252) * 100
         
-        info = ticker.info
+        try:
+            info = ticker.info
+            long_name = info.get('longName', symbol.upper())
+        except:
+            long_name = symbol.upper()
+
         fund = {
-            "name": info.get('longName', symbol.upper()),
+            "name": long_name,
             "ticker": symbol.upper(),
             "price": last['Close'],
             "currency": currency,
@@ -131,10 +122,13 @@ def get_stock_data(symbol):
 # ==========================================
 def predict_60_days(df):
     df = df.reset_index()
-    # Handle Date Column
-    date_col = df.columns[0] # Usually 'Date' or 'Datetime'
+    # Robust Date Column Detection
+    date_col = 'Date'
+    if 'Date' not in df.columns:
+        if 'Datetime' in df.columns: date_col = 'Datetime'
+        else: date_col = df.columns[0]
     
-    # Linear Regression on Ordinal Dates
+    # Linear Regression
     df['ordinal'] = df[date_col].apply(lambda x: x.toordinal())
     
     X = df[['ordinal']]
@@ -154,9 +148,6 @@ def predict_60_days(df):
 # 4. REPORT ENGINE (Crash-Proof HTML)
 # ==========================================
 def create_html_report(fund, df, prediction_data):
-    # This creates a professional HTML file instead of a fragile PDF
-    # It supports ALL symbols (₹) and never crashes.
-    
     target_price = prediction_data[1][-1]
     
     html = f"""
@@ -230,7 +221,6 @@ def create_html_report(fund, df, prediction_data):
 with st.sidebar:
     st.title("📊 Control Panel")
     
-    # Guest Mode Logic
     if 'user_tier' not in st.session_state:
         st.session_state.user_tier = "Guest"
     
@@ -252,7 +242,6 @@ with st.sidebar:
 # --- MAIN PAGE ---
 st.title("📈 StockOracle: India Edition")
 
-# Ad Banner
 if st.session_state.user_tier == "Guest":
     st.markdown("""
     <div class="ad-banner">
@@ -261,7 +250,6 @@ if st.session_state.user_tier == "Guest":
     </div>
     """, unsafe_allow_html=True)
 
-# Search Bar
 symbol_input = st.text_input("Enter Symbol (e.g. TATASTEEL, RELIANCE, ZOMATO):", "RELIANCE")
 
 if st.button("🚀 Analyze Stock", type="primary"):
@@ -282,11 +270,8 @@ if st.button("🚀 Analyze Stock", type="primary"):
             f_dates, f_prices = predict_60_days(df)
             
             fig = go.Figure()
-            # Candlestick
             fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='History'))
-            # Prediction
             fig.add_trace(go.Scatter(x=f_dates, y=f_prices, name='AI Forecast', line=dict(color='#ab47bc', width=2, dash='dot')))
-            # EMA
             if 'EMA_50' in df.columns:
                 fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], name='50 EMA', line=dict(color='orange', width=1)))
 
@@ -307,7 +292,6 @@ if st.button("🚀 Analyze Stock", type="primary"):
                 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.subheader("📄 Report Center")
                 
-                # HTML Report Generation
                 report_html = create_html_report(fund, df, (f_dates, f_prices))
                 b64 = base64.b64encode(report_html.encode()).decode()
                 href = f'<a href="data:text/html;base64,{b64}" download="{fund["ticker"]}_Report.html" style="text-decoration:none; color:white; background:#00CC96; padding:10px 20px; border-radius:5px; font-weight:bold;">📥 Download Full Report</a>'

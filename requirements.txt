@@ -3,9 +3,6 @@ yfinance>=0.2.40
 pandas
 pandas_ta
 numpy
-requests
-fpdf
-textblob
 plotly
 scikit-learn
-kaleido==0.2.1
+textblob
